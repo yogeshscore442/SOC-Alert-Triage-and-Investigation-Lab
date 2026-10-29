@@ -1,0 +1,84 @@
+```spl
+/*
+===================================================================
+SPL QUERY: Failed Windows Logon Analysis
+File: splunk/failed-logon-analysis.spl
+Target Event: Event ID 4625 (An account failed to log on)
+Sourcetypes: WinEventLog:Security OR _json (Sample Dataset)
+===================================================================
+
+1. INVESTIGATION OBJECTIVE:
+   Identify repeated authentication failures, pinpoint targeted user accounts,
+   isolate the source IP/workstation initiating the attempts, and categorize 
+   the exact failure sub-status codes (e.g., bad password vs. non-existent user).
+
+2. REQUIRED FIELDS & ASSUMPTIONS:
+   - EventCode / EventID: Must equal 4625.
+   - TargetUserName: Account name that was attempted.
+   - WorkstationName: Hostname reported by the client.
+   - IpAddress: Source IP address initiating authentication.
+   - Status: Primary NTSTATUS code (e.g., 0xC000006D = logon failure).
+   - SubStatus: Specific reason code:
+       * 0xC0000064 = User name does not exist (Indicates account enumeration/guessing).
+       * 0xC000006A = Valid username, but password was incorrect (Indicates password spraying or brute force).
+   - LogonType: Numerical logon type:
+       * 2 = Interactive (Console)
+       * 3 = Network (SMB, RPC, Kerberos/NTLM network share)
+       * 10 = RemoteInteractive (RDP)
+
+   *Field extraction note: In native Splunk TA for Windows, fields are often parsed as
+   EventCode, user, src_ip, and Logon_Type. When using raw JSON or custom sourcetypes,
+   eval coalesce statements ensure compatibility.
+*/
+
+index=* (EventCode=4625 OR EventID=4625)
+| eval TargetUser=coalesce(TargetUserName, user, Account_Name)
+| eval SourceIP=coalesce(IpAddress, src_ip, Source_Network_Address)
+| eval Station=coalesce(WorkstationName, src_host, Workstation)
+| eval FailureCode=coalesce(SubStatus, Sub_Status)
+| eval FailureReason=case(
+    FailureCode="0xC0000064" OR FailureCode="0xc0000064", "Username does not exist",
+    FailureCode="0xC000006A" OR FailureCode="0xc000006a", "Bad password",
+    FailureCode="0xC0000234" OR FailureCode="0xc0000234", "Account locked out",
+    FailureCode="0xC0000072" OR FailureCode="0xc0000072", "Account disabled",
+    true(), "Other / ".FailureCode
+  )
+| eval LogonTypeDescription=case(
+    LogonType=2, "2: Interactive (Console)",
+    LogonType=3, "3: Network (SMB/RPC)",
+    LogonType=10, "10: Remote Desktop (RDP)",
+    true(), "Type: ".LogonType
+  )
+| stats count as AttemptCount,
+        earliest(_time) as FirstAttempt,
+        latest(_time) as LastAttempt,
+        values(FailureReason) as FailureReasons,
+        values(LogonTypeDescription) as LogonTypes
+        by SourceIP, Station, TargetUser
+| convert timeformat="%Y-%m-%d %H:%M:%S" ctime(FirstAttempt) ctime(LastAttempt)
+| sort - AttemptCount
+
+/*
+===================================================================
+3. EXPECTED OUTPUT ON SYNTHETIC DATASET:
+   -----------------------------------------------------------------------------------------------------------------------
+   SourceIP       Station       TargetUser     AttemptCount  FirstAttempt         LastAttempt          FailureReasons            LogonTypes
+   -----------------------------------------------------------------------------------------------------------------------
+   192.168.10.105 ATTACK-HOST   jdoe           2             2026-10-24 14:17:15  2026-10-24 14:18:02  Bad password              10: Remote Desktop (RDP)
+   192.168.10.105 ATTACK-HOST   Administrator  1             2026-10-24 14:16:04  2026-10-24 14:16:04  Bad password              3: Network (SMB/RPC)
+   192.168.10.105 ATTACK-HOST   admin_svc      1             2026-10-24 14:15:22  2026-10-24 14:15:22  Username does not exist   3: Network (SMB/RPC)
+   -----------------------------------------------------------------------------------------------------------------------
+
+4. ANALYST VALIDATION & REASONING:
+   - Notice the sequence: First, a non-existent service account (`admin_svc`) is tested via SMB.
+   - Next, high-privilege `Administrator` is tested with an invalid password.
+   - Then, valid user `jdoe` is targeted via RDP (LogonType 10).
+   - This pattern indicates deliberate credential testing/spraying from source IP 192.168.10.105.
+
+5. POTENTIAL FALSE POSITIVES / BENIGN CAUSES:
+   - Expired cached credentials on an employee workstation, mapped network drive, or scheduled task.
+   - Typo by an authorized user entering a password on their standard workstation.
+   - Vulnerability scanner running scheduled authenticated or unauthenticated discovery.
+===================================================================
+*/
+```

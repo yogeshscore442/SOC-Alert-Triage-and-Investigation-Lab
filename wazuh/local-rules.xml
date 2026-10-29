@@ -1,0 +1,69 @@
+<!--
+  ===================================================================
+  Wazuh Custom Detection Rules: Windows Authentication & Sysmon Triage
+  File: wazuh/local-rules.xml
+  Target Deployment: /var/ossec/etc/rules/local_rules.xml on Wazuh Manager
+  ===================================================================
+-->
+
+<group name="windows,authentication,sysmon_custom,">
+
+  <!-- 
+    Rule 100050: Repeated Windows Authentication Failures (Event ID 4625)
+    Parent: Rule 60122 (Logon Failure - Event 4625 in default Windows ruleset)
+  -->
+  <rule id="100050" level="8" frequency="3" timeframe="120">
+    <if_matched_sid>60122</if_matched_sid>
+    <same_source_ip />
+    <description>Multiple Windows authentication failures (Event 4625) detected from single source IP within 2 minutes.</description>
+    <mitre>
+      <id>T1110.001</id>
+      <id>T1110.003</id>
+    </mitre>
+    <info type="link">https://attack.mitre.org/techniques/T1110/</info>
+  </rule>
+
+  <!-- 
+    Rule 100051: Suspicious Successful Logon following Repeated Failures
+    Correlates failure alert (100050) with successful logon (Rule 60106: Event 4624)
+  -->
+  <rule id="100051" level="12" timeframe="300">
+    <if_sid>60106</if_sid>
+    <if_matched_sid>100050</if_matched_sid>
+    <same_source_ip />
+    <description>CRITICAL: Successful Windows logon (Event 4624) observed from IP $(win.eventdata.ipAddress) shortly after repeated failure alerts.</description>
+    <mitre>
+      <id>T1078</id>
+      <id>T1110</id>
+    </mitre>
+  </rule>
+
+  <!-- 
+    Rule 100052: Sysmon Process Creation - PowerShell Execution Policy Bypass / Hidden Window
+    Triggers on Sysmon Event ID 1 where powershell.exe runs with evasion flags
+  -->
+  <rule id="100052" level="10">
+    <if_group>sysmon_process_create</if_group>
+    <field name="win.eventdata.image" type="pcre2">(?i)powershell\.exe$</field>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(-ExecutionPolicy\s+Bypass|-WindowStyle\s+Hidden|-w\s+hidden|-enc|-EncodedCommand)</field>
+    <description>Sysmon: PowerShell executed with command-line evasion flags (Bypass / Hidden / Encoded) by user $(win.eventdata.user).</description>
+    <mitre>
+      <id>T1059.001</id>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+  <!-- 
+    Rule 100053: Reconnaissance output directed to C:\Users\Public
+  -->
+  <rule id="100053" level="9">
+    <if_group>sysmon_process_create</if_group>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(>|Out-File).*C:\\Users\\Public\\</field>
+    <description>Sysmon: Command output redirected to staging directory C:\Users\Public\ by user $(win.eventdata.user).</description>
+    <mitre>
+      <id>T1083</id>
+      <id>T1074.001</id>
+    </mitre>
+  </rule>
+
+</group>

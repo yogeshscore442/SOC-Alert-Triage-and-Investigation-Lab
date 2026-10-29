@@ -1,0 +1,35 @@
+# Operating System Artifacts
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+ENV/
+
+# Virtual Machine Files
+*.vmdk
+*.vmem
+*.nvram
+*.vmx
+*.log
+
+# Sensitive Logs / Local Secrets
+*.pcap
+*.evtx
+credentials.txt
+*.key
+*.pem
+secrets/
+
+# Splunk Local User Files
+local/
+etc/auth/
+splunk.pid

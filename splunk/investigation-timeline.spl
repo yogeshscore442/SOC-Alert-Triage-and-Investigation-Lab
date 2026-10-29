@@ -1,0 +1,77 @@
+```spl
+/*
+===================================================================
+SPL QUERY: Unified Cross-Source Incident Timeline
+File: splunk/investigation-timeline.spl
+Target Events: 
+  - Windows Security: 4625 (Fail), 4624 (Logon), 4672 (Privilege)
+  - Sysmon: 1 (Process Create), 3 (Network Connect)
+Sourcetypes: WinEventLog:Security, XmlWinEventLog:Microsoft-Windows-Sysmon/Operational, _json
+===================================================================
+
+1. INVESTIGATION OBJECTIVE:
+   Construct a single, chronological, multi-source narrative of the incident on host
+   WIN-LAB-01, tracing the initial failed authentications, the successful session,
+   subsequent process execution, privilege assignment, and network socket establishment.
+
+2. FIELDS NORMALIZED:
+   - _time: Event timestamp.
+   - EventCode / EventID: Numeric event identifier.
+   - ActivityType: Normalized description of the event action.
+   - SubjectOrUser: User account associated with the action.
+   - SessionID: TargetLogonId / LogonId.
+   - Details: Human-readable context summarizing the key parameters of the event.
+*/
+
+index=* (EventCode=4625 OR EventID=4625 OR EventCode=4624 OR EventID=4624 OR EventCode=4672 OR EventID=4672 OR EventCode=1 OR EventID=1 OR EventCode=3 OR EventID=3)
+| eval EID=coalesce(EventCode, EventID)
+| eval Timestamp=_time
+| eval Host=coalesce(Computer, host)
+| eval NormalizedUser=coalesce(TargetUserName, SubjectUserName, User, user, "SYSTEM")
+| eval Session=coalesce(TargetLogonId, SubjectLogonId, LogonId, "N/A")
+| eval ActivityType=case(
+    EID=4625, "Authentication Failure (4625)",
+    EID=4624, "Successful Logon (4624)",
+    EID=4672, "Special Privileges Assigned (4672)",
+    EID=1,    "Process Creation (Sysmon 1)",
+    EID=3,    "Network Connection (Sysmon 3)",
+    true(),   "Other Event (".EID.")"
+  )
+| eval SummaryDetails=case(
+    EID=4625, "Failed logon for [".NormalizedUser."] from IP: ".coalesce(IpAddress, src_ip)." | SubStatus: ".coalesce(SubStatus, "N/A")." | LogonType: ".LogonType,
+    EID=4624, "Successful logon for [".NormalizedUser."] from IP: ".coalesce(IpAddress, src_ip)." | LogonType: ".LogonType." | Session: ".Session,
+    EID=4672, "Privileges assigned to [".NormalizedUser."] | Session: ".Session." | Privileges: ".replace(PrivilegeList, "\n", ", "),
+    EID=1,    "Process: [".coalesce(Image, process_path)."] (PID: ".ProcessId.") spawned by [".coalesce(ParentImage, parent_process_path)."] (PPID: ".ParentProcessId.") | Command: ".coalesce(CommandLine, process_exec),
+    EID=3,    "Process: [".coalesce(Image, process_path)."] (PID: ".ProcessId.") connected to [".DestinationIp.":".DestinationPort."] via ".Protocol,
+    true(),   "Event details unparsed"
+  )
+| sort 0 _time
+| table _time, Host, EID, ActivityType, NormalizedUser, Session, SummaryDetails
+
+/*
+===================================================================
+3. EXPECTED OUTPUT ON SYNTHETIC DATASET:
+   --------------------------------------------------------------------------------------------------------------------------------------------------------
+   _time                Host            EID  ActivityType                     NormalizedUser Session  SummaryDetails
+   --------------------------------------------------------------------------------------------------------------------------------------------------------
+   2026-10-24 14:15:22  WIN-LAB-01...   4625 Authentication Failure (4625)    admin_svc      N/A      Failed logon for [admin_svc] from IP: 192.168.10.105...
+   2026-10-24 14:16:04  WIN-LAB-01...   4625 Authentication Failure (4625)    Administrator  N/A      Failed logon for [Administrator] from IP: 192.168.10.105...
+   2026-10-24 14:17:15  WIN-LAB-01...   4625 Authentication Failure (4625)    jdoe           N/A      Failed logon for [jdoe] from IP: 192.168.10.105...
+   2026-10-24 14:18:02  WIN-LAB-01...   4625 Authentication Failure (4625)    jdoe           N/A      Failed logon for [jdoe] from IP: 192.168.10.105...
+   2026-10-24 14:22:10  WIN-LAB-01...   4624 Successful Logon (4624)          jdoe           0x14A28F Successful logon for [jdoe] from IP: 192.168.10.105...
+   2026-10-24 14:22:11  WIN-LAB-01...   4672 Special Privileges Assigned (4672) jdoe         0x14A28F Privileges assigned to [jdoe] | Session: 0x14A28F...
+   2026-10-24 14:23:45  WIN-LAB-01...   1    Process Creation (Sysmon 1)      LAB\jdoe       0x14A28F Process: [cmd.exe] (PID: 4820) spawned by [explorer.exe]...
+   2026-10-24 14:25:30  WIN-LAB-01...   1    Process Creation (Sysmon 1)      LAB\jdoe       0x14A28F Process: [powershell.exe] (PID: 5192) spawned by [cmd.exe]...
+   2026-10-24 14:28:15  WIN-LAB-01...   3    Network Connection (Sysmon 3)    LAB\jdoe       N/A      Process: [powershell.exe] (PID: 5192) connected to [198.51.100.42:443]...
+   2026-10-24 14:30:02  WIN-LAB-01...   1    Process Creation (Sysmon 1)      LAB\jdoe       0x14A28F Process: [cmd.exe] (PID: 6044) spawned by [explorer.exe]...
+   --------------------------------------------------------------------------------------------------------------------------------------------------------
+
+4. HOW AN ANALYST USES THIS TIMELINE IN AN INCIDENT BRIEFING:
+   "At 14:15 UTC, host 192.168.10.105 initiated credential testing against admin_svc and Administrator, both failing.
+    At 14:17, attacks pivoted to jdoe via RDP, failing twice, before succeeding at 14:22 (Session 0x14A28F).
+    Within 90 seconds of logon, cmd.exe and hidden PowerShell were spawned to enumerate local privileges and listening ports,
+    redirecting output to C:\Users\Public. At 14:28, the PowerShell process initiated an outbound TLS socket to external IP
+    198.51.100.42. At 14:30, desktop files were staged to C:\Users\Public\file_list.txt."
+===================================================================
+*/
+```

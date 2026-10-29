@@ -1,0 +1,68 @@
+```spl
+/*
+===================================================================
+SPL QUERY: Authentication Correlation (Event 4625 to Event 4624)
+File: splunk/authentication-correlation.spl
+Target Events: Event ID 4625 (Failure), Event ID 4624 (Success)
+Sourcetypes: WinEventLog:Security OR _json (Sample Dataset)
+===================================================================
+
+1. INVESTIGATION OBJECTIVE:
+   Correlate repeated authentication failures with a subsequent successful logon
+   occurring from the same source IP or targeting the same user account within 
+   a defined time window (e.g., 30 minutes).
+
+2. REQUIRED FIELDS & ASSUMPTIONS:
+   - EventCode / EventID: 4625 (Failure) or 4624 (Success).
+   - TargetUserName: User name targeted.
+   - IpAddress: Source IP address.
+   - TargetLogonId: Unique hexadecimal identifier assigned by the LSA to the session (Event 4624).
+   - LogonType: Authentication method (Console=2, Network=3, RDP=10).
+*/
+
+index=* (EventCode=4625 OR EventID=4625 OR EventCode=4624 OR EventID=4624)
+| eval EventType=if(EventCode==4625 OR EventID==4625, "Failure (4625)", "Success (4624)")
+| eval TargetUser=coalesce(TargetUserName, user, Account_Name)
+| eval SourceIP=coalesce(IpAddress, src_ip, Source_Network_Address)
+| eval LogonID=coalesce(TargetLogonId, LogonId, "N/A")
+| eval Station=coalesce(WorkstationName, src_host, Workstation)
+| filter TargetUser!="-" AND TargetUser!="SYSTEM" AND TargetUser!="LOCAL SERVICE" AND TargetUser!="NETWORK SERVICE"
+| stats count(eval(EventType="Failure (4625)")) as FailCount,
+        count(eval(EventType="Success (4624)")) as SuccessCount,
+        earliest(eval(if(EventType="Failure (4625)", _time, null()))) as FirstFailureTime,
+        latest(eval(if(EventType="Failure (4625)", _time, null()))) as LastFailureTime,
+        earliest(eval(if(EventType="Success (4624)", _time, null()))) as SuccessTime,
+        values(LogonID) as SessionLogonIDs,
+        values(Station) as Workstations,
+        values(LogonType) as LogonTypes
+        by SourceIP, TargetUser
+| where FailCount > 0 AND SuccessCount > 0
+| eval SecondsBetweenLastFailAndSuccess = SuccessTime - LastFailureTime
+| where SecondsBetweenLastFailAndSuccess >= 0 AND SecondsBetweenLastFailAndSuccess <= 1800
+| convert timeformat="%Y-%m-%d %H:%M:%S" ctime(FirstFailureTime) ctime(LastFailureTime) ctime(SuccessTime)
+| table SourceIP, TargetUser, FailCount, SuccessCount, FirstFailureTime, LastFailureTime, SuccessTime, SecondsBetweenLastFailAndSuccess, SessionLogonIDs, LogonTypes
+
+/*
+===================================================================
+3. EXPECTED OUTPUT ON SYNTHETIC DATASET:
+   -----------------------------------------------------------------------------------------------------------------------------------
+   SourceIP       TargetUser  FailCount SuccessCount FirstFailureTime     LastFailureTime      SuccessTime          SecondsBetween... SessionLogonIDs LogonTypes
+   -----------------------------------------------------------------------------------------------------------------------------------
+   192.168.10.105 jdoe        2         1            2026-10-24 14:17:15  2026-10-24 14:18:02  2026-10-24 14:22:10  248               0x14A28F        10
+   -----------------------------------------------------------------------------------------------------------------------------------
+
+4. ANALYST REASONING & CORRELATION:
+   - User `jdoe` failed RDP authentication twice between 14:17:15 and 14:18:02 from `192.168.10.105`.
+   - Exactly 4 minutes and 8 seconds later (248 seconds), a successful logon was established.
+   - The session was granted `TargetLogonId: 0x14A28F`.
+   - This `TargetLogonId` serves as the primary pivot anchor for correlating endpoint process creation in Sysmon.
+
+5. CRITICAL HYPOTHESIS TESTING (Avoiding Premature Conclusions):
+   - Hypothesis A: Adversary successfully guessed or cracked the password on the 3rd/4th attempt.
+   - Hypothesis B: Legitimate employee mistyped their password twice, recalled the correct password, and logged in.
+   - Conclusion Rule: A successful logon after failed attempts CANNOT be called an incident or compromise on its own.
+     An analyst must pivot to endpoint telemetry (process execution, logon scripts, network sockets) under `TargetLogonId 0x14A28F`
+     to determine whether post-authentication activity is authorized user work or adversary behavior.
+===================================================================
+*/
+```

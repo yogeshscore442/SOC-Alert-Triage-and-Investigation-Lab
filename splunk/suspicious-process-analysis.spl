@@ -1,0 +1,67 @@
+```spl
+/*
+===================================================================
+SPL QUERY: Suspicious Process Creation & Post-Logon Triage
+File: splunk/suspicious-process-analysis.spl
+Target Event: Sysmon Event ID 1 (Process Create)
+Sourcetypes: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational OR _json
+===================================================================
+
+1. INVESTIGATION OBJECTIVE:
+   Identify suspicious command-line executions, reconnaissance utilities (whoami, net, ipconfig),
+   scripting engines launched with evasion arguments (-ExecutionPolicy Bypass, -WindowStyle Hidden),
+   and inspect parent-child relationships under specific logon sessions.
+
+2. REQUIRED FIELDS & ASSUMPTIONS:
+   - EventCode / EventID: 1 (Sysmon Process Create).
+   - Image: Full filesystem path of the spawned executable.
+   - CommandLine: Exact arguments passed to the binary.
+   - ParentImage: Binary that initiated execution.
+   - ParentCommandLine: Arguments of the parent.
+   - ProcessId: Operating system PID.
+   - ParentProcessId: Parent PID.
+   - User: Security context under which the process was executed.
+   - LogonId: LSA session identifier matching Windows Security Event 4624.
+   - Hashes: Cryptographic hashes (MD5, SHA256) of the binary.
+*/
+
+index=* (EventCode=1 OR EventID=1)
+| eval ProcImage=coalesce(Image, process_path, process_name)
+| eval ProcCmd=coalesce(CommandLine, process_exec, cmdline)
+| eval ParentProc=coalesce(ParentImage, parent_process_path, parent_process_name)
+| eval ProcUser=coalesce(User, user)
+| eval SessionID=coalesce(LogonId, LogonGuid)
+| eval HashVal=coalesce(Hashes, hash)
+| eval SuspiciousScore=0
+| eval SuspiciousScore=if(match(ProcCmd, "(?i)(-ExecutionPolicy\s+Bypass|-enc|-w\s+hidden|WindowStyle\s+Hidden)"), SuspiciousScore+3, SuspiciousScore)
+| eval SuspiciousScore=if(match(ProcCmd, "(?i)(whoami|net\.exe|quser|Get-NetTCPConnection|ipconfig)"), SuspiciousScore+2, SuspiciousScore)
+| eval SuspiciousScore=if(match(ProcCmd, "(?i)(C:\\Users\\Public\\|AppData\\Local\\Temp\\)"), SuspiciousScore+2, SuspiciousScore)
+| eval IsPivotSession=if(SessionID="0x14A28F", "YES (Target Session)", "NO")
+| table _time, ProcUser, SessionID, IsPivotSession, ParentProc, ProcImage, ProcCmd, ProcessId, ParentProcessId, SuspiciousScore, HashVal
+| sort - _time
+
+/*
+===================================================================
+3. EXPECTED OUTPUT ON SYNTHETIC DATASET:
+   -------------------------------------------------------------------------------------------------------------------------------------------------------
+   _time                ProcUser  SessionID  IsPivotSession         ParentProc              ProcImage           ProcCmd                                           SuspiciousScore
+   -------------------------------------------------------------------------------------------------------------------------------------------------------
+   2026-10-24 14:30:02  LAB\jdoe  0x14A28F   YES (Target Session)   C:\Windows\explorer.exe C:\...\cmd.exe      cmd.exe /c dir C:\Users\jdoe\Desktop /s > C:\...  2
+   2026-10-24 14:25:30  LAB\jdoe  0x14A28F   YES (Target Session)   C:\Windows\...\cmd.exe  C:\...\powershell   powershell.exe -ExecutionPolicy Bypass -NoProfile 5
+   2026-10-24 14:23:45  LAB\jdoe  0x14A28F   YES (Target Session)   C:\Windows\explorer.exe C:\...\cmd.exe      cmd.exe /c whoami /all                            2
+   -------------------------------------------------------------------------------------------------------------------------------------------------------
+
+4. ANALYST REASONING:
+   - The user session `0x14A28F` (authenticated via RDP after 2 failed attempts) immediately initiated:
+     1. `whoami /all` (T1033 - System Owner/User Discovery) to inspect token privileges.
+     2. A child PowerShell instance launched with `-ExecutionPolicy Bypass -WindowStyle Hidden` querying active listening ports (`Get-NetTCPConnection`) and piping output to `C:\Users\Public\net_recon.txt`.
+     3. A subsequent directory listing of the user's Desktop piped to `C:\Users\Public\file_list.txt`.
+   - The combination of discovery commands, output redirection to a shared directory (`C:\Users\Public`), and command-line evasion flags elevates this activity from benign user activity to highly suspicious post-exploitation discovery.
+
+5. POTENTIAL FALSE POSITIVES:
+   - IT Administration scripts or SCCM/Intune deployment jobs running PowerShell with bypass flags.
+   - Legitimate software installers writing temporary staging files to `C:\Users\Public`.
+   - Security auditing or compliance tools running inventory scripts.
+===================================================================
+*/
+```

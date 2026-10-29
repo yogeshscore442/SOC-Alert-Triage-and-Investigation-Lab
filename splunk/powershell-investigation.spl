@@ -1,0 +1,68 @@
+```spl
+/*
+===================================================================
+SPL QUERY: PowerShell Execution, Scripting Triage & Telemetry Gaps
+File: splunk/powershell-investigation.spl
+Target Events: Sysmon Event ID 1 (powershell.exe), PowerShell Event IDs 4104 (Script Block) / 4103
+Sourcetypes: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational, WinEventLog:Microsoft-Windows-PowerShell/Operational, _json
+===================================================================
+
+1. INVESTIGATION OBJECTIVE:
+   Identify suspicious PowerShell processes, flag obfuscation, evasion arguments
+   (-enc, -nop, -w hidden, -ep bypass), inspect command lines for recon cmdlets
+   (Get-NetTCPConnection, Invoke-WebRequest, IEX), and evaluate telemetry gaps when
+   Script Block Logging (Event 4104) is absent or disabled.
+
+2. REQUIRED FIELDS:
+   - Sysmon Event 1: Image, CommandLine, ParentImage, ParentProcessId, ProcessId, User, LogonId.
+   - PowerShell Event 4104 (if present): ScriptBlockText, Path.
+*/
+
+index=* (EventCode=1 OR EventID=1 OR EventCode=4104 OR EventID=4104) (Image="*powershell.exe*" OR process_name="powershell.exe" OR Channel="*PowerShell*")
+| eval ProcessPath=coalesce(Image, process_path)
+| eval ExecutedCommand=coalesce(CommandLine, ScriptBlockText, Message)
+| eval ParentBinary=coalesce(ParentImage, parent_process_path)
+| eval UserContext=coalesce(User, user)
+| eval TargetSession=coalesce(LogonId, "Unknown")
+| eval EvasionIndicator=case(
+    match(ExecutedCommand, "(?i)-ExecutionPolicy\s+(Bypass|Unrestricted)"), "ExecutionPolicy Bypass",
+    match(ExecutedCommand, "(?i)(-w(indowstyle)?\s+hidden)"), "Hidden Window Execution",
+    match(ExecutedCommand, "(?i)(-enc(odedcommand)?)"), "Base64 Encoded Command",
+    match(ExecutedCommand, "(?i)(-nop(rofile)?)"), "No Profile Loaded",
+    true(), "Standard / Unflagged"
+  )
+| eval ReconIndicator=case(
+    match(ExecutedCommand, "(?i)Get-NetTCPConnection"), "Network Connection Enumeration",
+    match(ExecutedCommand, "(?i)(Invoke-WebRequest|Net\.WebClient|curl|wget)"), "Web Retrieval / Staging",
+    match(ExecutedCommand, "(?i)IEX|Invoke-Expression"), "Dynamic Code Execution",
+    true(), "General Command"
+  )
+| table _time, EventCode, UserContext, TargetSession, ParentBinary, ProcessPath, EvasionIndicator, ReconIndicator, ExecutedCommand
+| sort - _time
+
+/*
+===================================================================
+3. EXPECTED OUTPUT ON SYNTHETIC DATASET:
+   ---------------------------------------------------------------------------------------------------------------------------------------------------
+   _time                EventCode UserContext TargetSession ParentBinary         ProcessPath             EvasionIndicator        ReconIndicator
+   ---------------------------------------------------------------------------------------------------------------------------------------------------
+   2026-10-24 14:25:30  1         LAB\jdoe    0x14A28F      C:\...\cmd.exe       C:\...\powershell.exe   ExecutionPolicy Bypass  Network Connection Enumeration
+   ---------------------------------------------------------------------------------------------------------------------------------------------------
+
+4. TELEMETRY GAP DOCUMENTATION:
+   - Observation: In our synthetic dataset, Sysmon Event ID 1 captured the full CLI argument:
+     powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -Command "Get-NetTCPConnection | Where-Object {$_.State -eq 'Listen'} | Out-File C:\Users\Public\net_recon.txt"
+   - Telemetry Gap: If an adversary uses Base64 encoded commands (`-enc <base64>`) or executes scripts from files,
+     Sysmon Event 1 shows only the encoded blob or file path (`powershell.exe -File script.ps1`).
+   - Prerequisite Fix: In an enterprise baseline, Group Policy must enforce:
+     * Computer Configuration -> Administrative Templates -> Windows Components -> Windows PowerShell:
+       1. Turn on PowerShell Script Block Logging (Generates Event ID 4104, capturing decoded executable code).
+       2. Turn on PowerShell Transcription (Logs all I/O to a protected centralized share).
+
+5. MITRE ATT&CK MAPPING:
+   - T1059.001 - Command and Scripting Interpreter: PowerShell
+   - T1562.001 - Impair Defenses: Disable or Modify Tools (Execution Policy Bypass)
+   - T1049 - System Network Connections Discovery
+===================================================================
+*/
+```
